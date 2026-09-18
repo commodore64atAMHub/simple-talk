@@ -1,0 +1,13 @@
+# build outputs
+dist/
+*.build/
+*.dist/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# editors / OS
+.DS_Store
