@@ -19,7 +19,7 @@ async def run(host: str, port: int, hop_ms: int, seed: int | None) -> None:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="simple-talk-server", description="simulated mesh chat server")
-    p.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1)")
+    p.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1; use 0.0.0.0 so other machines can join)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT, help="port (default %(default)s)")
     p.add_argument("--hop-ms", type=int, default=120, help="simulated per-hop latency in ms (default %(default)s)")
     p.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible topology")

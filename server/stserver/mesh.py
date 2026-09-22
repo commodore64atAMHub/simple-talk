@@ -122,5 +122,13 @@ class Mesh:
         out = []
         for i in self._order:
             nd = self.nodes[i]
-            out.append({"id": nd.node_id, "nick": nd.nick, "x": nd.x, "y": nd.y})
+            out.append(
+                {
+                    "id": nd.node_id,
+                    "nick": nd.nick,
+                    "x": nd.x,
+                    "y": nd.y,
+                    "peers": self.peers_of(i),
+                }
+            )
         return out

@@ -75,6 +75,7 @@ Notes on cross-platform builds:
 | ----------------- | ----------------------------------------- |
 | `any text`        | broadcast to every node on the mesh       |
 | `/msg <nick> ...` | route a unicast message via the mesh      |
+| `/show`           | draw the current mesh (nodes + links)     |
 | `/help`           | list commands                             |
 | `/quit`           | leave (Ctrl-D / Ctrl-C also work)         |
 
@@ -87,6 +88,41 @@ python3 server/main.py --help
   --hop-ms N       simulated per-hop latency in ms (default 120)
   --seed N         fix the random topology
 ```
+
+## Playing across machines (LAN)
+
+The server binds **loopback only** by default, so a remote friend will not
+reach it. On the host machine:
+
+```sh
+python3 server/main.py --host 0.0.0.0
+```
+
+The server then prints every IPv4 address other machines can connect to,
+plus Windows-firewall hints. On the friend's machine:
+
+```sh
+python3 client/main.py --host <host-ip> --nick buddy
+```
+
+Where `<host-ip>` is the IPv4 from `ipconfig` **of the active adapter**
+(Wi-Fi / ethernet — not a Hyper-V or VPN virtual adapter); run `ipconfig`
+and pick the one that is on the same subnet as your friend. The client
+fails fast with a checklist if the server never answers.
+
+Common reasons two school laptops can't talk even with `--host 0.0.0.0`:
+
+* **Same default nick.** Both laptops often share the same logged-in
+  username, so both default to the same nick and the second one is
+  rejected with `nick already in use`. Pass `--nick` explicitly on both.
+* **Windows Firewall.** Allow python / `simple-talk-server` on inbound
+  *Private* networks; on a *Public* (or domain-managed) profile inbound
+  connections are silently dropped.
+* **Wi-Fi client isolation.** Many school/guest networks block
+  device-to-device traffic entirely. Fall back to a phone hotspot, or
+  cable the two laptops together.
+* **Wrong address.** The `ipconfig` output lists several adapters; use the
+  one that shares the same subnet as your friend's laptop.
 
 ## How the mesh works
 
@@ -113,7 +149,4 @@ client/            client package: net.py, ui.py, protocol.py, __main__.py
 server/            mesh sim: mesh.py, server.py, __main__.py, protocol.py
 scripts/           smoke_test.py (end-to-end test over the real protocol)
 Makefile           cross-platform build + dev/test targets
-```# simple-talk
-# simple-talk
-# simple-talk
-# simple-talk
+```

@@ -7,14 +7,16 @@ import logging
 import sys
 
 from . import __version__, protocol
+from .meshview import render_mesh
 from .net import MeshClient
-from .ui import ChatUI, KeyReader, PlainUI, Terminal, enable_windows_vt
+from .ui import ChatUI, KeyReader, PlainUI, Terminal, enable_windows_vt, term_size
 
 HELP_TEXT = (
     "commands:\n"
     "  type a line                broadcast to the whole mesh\n"
     "  /msg <nick> <text>         send to one node via mesh routing\n"
     "  /n <nick> <text>           alias for /msg\n"
+    "  /show                      draw the current mesh (nodes + links)\n"
     "  /help                      this help\n"
     "  /quit                      exit (Ctrl-C / Ctrl-D also work)"
 )
@@ -40,7 +42,8 @@ class App:
 
     # ---- display helpers -------------------------------------------
     def nick_of(self, node_id):
-        return self._nodes_map.get(node_id, f"node{node_id}")
+        nd = self._nodes_map.get(node_id)
+        return nd.get("nick", f"node{node_id}") if isinstance(nd, dict) else f"node{node_id}"
 
     def peers_label(self) -> str:
         names = [self.nick_of(i) for i in self._peers]
@@ -94,6 +97,8 @@ class App:
                 await self.client.say(target, body)
             except (ConnectionError, RuntimeError):
                 self.display.add_raw("connection lost")
+        elif cmd == "/show":
+            await self.on_show()
         elif cmd == "/help":
             for line in HELP_TEXT.splitlines():
                 self.display.add_raw(line, kind="?")
@@ -118,7 +123,7 @@ class App:
     # ---- server message handlers ------------------------------------
     async def on_welcome(self, msg):
         self._self = msg["self"]
-        self._nodes_map = {n["id"]: n["nick"] for n in msg.get("nodes", [])}
+        self._nodes_map = {n["id"]: n for n in msg.get("nodes", [])}
         self._peers = msg.get("peers", [])
         self.refresh_status()
         self.display.add_raw(
@@ -133,8 +138,19 @@ class App:
         self._peers = msg.get("peers", [])
         self.refresh_status()
 
+    async def on_node_map(self, msg):
+        self._nodes_map = {n["id"]: n for n in msg.get("nodes", [])}
+        own = self._nodes_map.get(self._self["id"]) if self._self else None
+        if isinstance(own, dict) and "peers" in own:
+            self._peers = own["peers"]
+        self.refresh_status()
+
     async def on_node_join(self, msg):
-        self.display.add_raw(f"* mesh node joined: {msg.get('node', {}).get('nick')}")
+        node = msg.get("node", {})
+        self.display.add_raw(f"* mesh node joined: {node.get('nick')}")
+        if node.get("id") is not None and node["id"] not in self._nodes_map:
+            self._nodes_map[node["id"]] = node
+        self.refresh_status()
 
     async def on_node_leave(self, msg):
         self.display.add_raw(f"x mesh node left: {msg.get('nick')}")
@@ -165,7 +181,33 @@ class App:
         self.display.set_activity(f"delivered to {to} {detail}")
 
     async def on_error(self, msg):
-        self.display.add_raw(f"error: {msg.get('reason', 'unknown')}", kind="!")
+        reason = msg.get("reason", "unknown")
+        if self._self is None:
+            # Rejected during the handshake (e.g. duplicate nick) -- do not
+            # linger as a zombie "connecting to mesh..." client.
+            self.display.add_raw(f"connection rejected by server: {reason}", kind="!")
+            await self.quit()
+            return
+        self.display.add_raw(f"error: {reason}", kind="!")
+
+    async def on_show(self):
+        if self._self is None:
+            self.display.add_raw("not connected to a mesh yet", kind="?")
+            return
+        nodes = list(self._nodes_map.values())
+        if not nodes:
+            self.display.add_raw("no mesh data yet", kind="?")
+            return
+        edges = set()
+        for nd in nodes:
+            for pid in nd.get("peers", []):
+                if pid in self._nodes_map:
+                    edges.add(tuple(sorted((nd["id"], pid))))
+        cols, rows = term_size()
+        width = min(max(cols - 2, 40), 86)
+        height = min(max(rows - 8, 10), 20)
+        for line in render_mesh(nodes, sorted(edges), self_id=self._self["id"], width=width, height=height):
+            self.display.add_raw(line, kind="?")
 
     async def on_closed(self):
         self.display.add_raw("connection to mesh server closed")
@@ -217,6 +259,7 @@ async def run(args) -> int:
     for kind, cb in [
         ("welcome", app.on_welcome),
         ("peers", app.on_peers),
+        ("node_map", app.on_node_map),
         ("node_join", app.on_node_join),
         ("node_leave", app.on_node_leave),
         ("relay", app.on_relay),
@@ -235,7 +278,18 @@ async def run(args) -> int:
         if app.keys:
             app.keys.start()
         try:
-            await app.client.connect(args.nick)
+            await app.client.connect(args.nick, timeout=args.timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            print(
+                f"timed out after {args.timeout:g}s waiting for {args.host}:{args.port} -- the server is not answering.\n"
+                "  check that:\n"
+                f"    - the server was started with --host 0.0.0.0 (default {args.host} is loopback-only)\n"
+                "    - you used the right address from ipconfig (IPv4 of the ACTIVE adapter, not a VPN/Hyper-V one)\n"
+                "    - Windows Firewall allows the server on inbound Private networks\n"
+                "    - the network permits device-to-device traffic (school/guest wifi often isolates clients -- try a hotspot)",
+                file=sys.stderr,
+            )
+            return 1
         except (OSError, ConnectionError) as exc:
             print(f"could not connect to {args.host}:{args.port}: {exc}", file=sys.stderr)
             return 1
@@ -273,13 +327,29 @@ def parse_args(argv=None):
     p.add_argument("--host", default="127.0.0.1", help="mesh server host (default 127.0.0.1)")
     p.add_argument("--port", type=int, default=protocol.DEFAULT_PORT, help="mesh server port (default %(default)s)")
     p.add_argument("--nick", default=getpass.getuser(), help="nickname (default: current user)")
+    p.add_argument("--timeout", type=float, default=10.0, help="seconds to wait for the server to accept the connection (default %(default)s)")
     p.add_argument("--plain", action="store_true", help="force plain line mode (no TUI)")
     p.add_argument("--version", action="version", version=f"simple-talk {__version__}")
     return p.parse_args(argv)
 
 
+def _ensure_utf8_stdio():
+    """Write UTF-8 (with lossy fallback) instead of the ANSI codepage.
+
+    ``/show`` draws box-drawing characters; on a console that would
+    otherwise be cp1252/cp437 this keeps rendering from crashing (and
+    preserves the nice glyphs when possible).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv=None) -> int:
     enable_windows_vt()
+    _ensure_utf8_stdio()
     args = parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
     try:

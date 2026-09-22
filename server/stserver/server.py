@@ -12,12 +12,41 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
+import socket
 import uuid
 
 from .mesh import Mesh
 
 log = logging.getLogger("stserver")
+
+
+def lan_ipv4_addresses() -> list[str]:
+    """Best-effort list of this machine's non-loopback IPv4 addresses.
+
+    These are the addresses a remote client should point ``--host`` at.
+    Falls back to ``ipconfig``/``ip addr`` when detection fails.
+    """
+    addrs: set[str] = set()
+    try:
+        for info in socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM
+        ):
+            addrs.add(info[4][0])
+    except OSError:
+        pass
+    # Discovering the default-route source address (no packets are sent;
+    # connect() on a UDP socket only picks a local address).
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        addrs.add(s.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        s.close()
+    return sorted(a for a in addrs if not a.startswith("127.") and not a.startswith("169.254."))
 
 
 class ChatServer:
@@ -35,7 +64,37 @@ class ChatServer:
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._on_connect, self.host, self.port)
         addrs = ", ".join(str(s.getsockname()) for s in self._server.sockets)
+        bound_port = self._server.sockets[0].getsockname()[1] if self._server.sockets else self.port
         log.info("mesh server listening on %s", addrs)
+
+        if self.host in ("0.0.0.0", "::") or self.host == "":
+            lan = lan_ipv4_addresses()
+            if lan:
+                log.info(
+                    "reachable from other machines on this network at:\n%s",
+                    "\n".join(f"  {a}:{bound_port}   (client: python client/main.py --host {a})" for a in lan),
+                )
+            else:
+                log.info(
+                    "could not auto-detect a LAN address -- run `ipconfig` here and use an IPv4 "
+                    "address from the ACTIVE adapter (Wi-Fi, not Hyper-V/VPN virtual adapters)"
+                )
+            if os.name == "nt":
+                log.info(
+                    "Windows firewall tip: allow python (and the built simple-talk-server) for "
+                    "Private networks, and make sure the Wi-Fi/ethernet profile is set to Private "
+                    "-- on Public/domain profiles inbound connections are silently dropped"
+                )
+            log.info(
+                "if peers still cannot connect, the network likely blocks device-to-device "
+                "traffic (guest/school Wi-Fi client isolation) -- fall back to a phone hotspot"
+            )
+        else:
+            log.warning(
+                "bound to %s (loopback) -- other machines cannot reach the mesh. "
+                "Restart with --host 0.0.0.0 to accept LAN connections",
+                self.host,
+            )
 
     async def serve(self) -> None:
         async with self._server:

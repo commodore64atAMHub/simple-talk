@@ -33,8 +33,16 @@ class MeshClient:
     def closed(self) -> bool:
         return self._closed
 
-    async def connect(self, nick: str) -> None:
-        self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+    async def connect(self, nick: str, timeout: float = 10.0) -> None:
+        """Open the TCP connection and send ``hello``.
+
+        ``timeout`` bounds the connect phase. Without it, a firewall or
+        network that silently drops packets makes the client hang forever
+        with no explanation.
+        """
+        self.reader, self.writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port), timeout=max(1.0, timeout)
+        )
         await self._write({"type": "hello", "nick": nick})
 
     async def _write(self, payload: dict) -> None:
