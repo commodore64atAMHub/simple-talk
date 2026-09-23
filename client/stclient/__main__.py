@@ -16,7 +16,9 @@ HELP_TEXT = (
     "  type a line                broadcast to the whole mesh\n"
     "  /msg <nick> <text>         send to one node via mesh routing\n"
     "  /n <nick> <text>           alias for /msg\n"
-    "  /show                      draw the current mesh (nodes + links)\n"
+    "  /show                      open the live mesh window (ASCII map in --plain)\n"
+    "  /dc <nick>                 snip a wire (/dc <a> <b> snips any pair)\n"
+    "  /cn <nick>                 re-attach a wire (/cn <a> <b> likewise)\n"
     "  /help                      this help\n"
     "  /quit                      exit (Ctrl-C / Ctrl-D also work)"
 )
@@ -39,6 +41,7 @@ class App:
         self._nodes_map = {}
         self._self = None
         self._peers = []
+        self.viz = None  # live mesh window (meshwindow.MeshWindow), opened by /show
 
     # ---- display helpers -------------------------------------------
     def nick_of(self, node_id):
@@ -99,6 +102,8 @@ class App:
                 self.display.add_raw("connection lost")
         elif cmd == "/show":
             await self.on_show()
+        elif cmd in ("/dc", "/cn", "/disconnect", "/connect"):
+            await self._wire_cmd(cmd, rest)
         elif cmd == "/help":
             for line in HELP_TEXT.splitlines():
                 self.display.add_raw(line, kind="?")
@@ -114,6 +119,9 @@ class App:
         except Exception:
             pass
         self.client.close()
+        viz, self.viz = self.viz, None
+        if viz is not None:
+            viz.close()
         if self._quit_evt:
             self._quit_evt.set()
 
@@ -133,6 +141,7 @@ class App:
         for n in msg.get("nodes", []):
             if n["id"] != self._self["id"]:
                 self.display.add_raw(f"  online: {n['nick']}")
+        self._viz_push_state()
 
     async def on_peers(self, msg):
         self._peers = msg.get("peers", [])
@@ -144,6 +153,7 @@ class App:
         if isinstance(own, dict) and "peers" in own:
             self._peers = own["peers"]
         self.refresh_status()
+        self._viz_push_state()
 
     async def on_node_join(self, msg):
         node = msg.get("node", {})
@@ -151,15 +161,29 @@ class App:
         if node.get("id") is not None and node["id"] not in self._nodes_map:
             self._nodes_map[node["id"]] = node
         self.refresh_status()
+        self._viz_push_state()
 
     async def on_node_leave(self, msg):
-        self.display.add_raw(f"x mesh node left: {msg.get('nick')}")
+        node = msg.get("node") or {"id": msg.get("id"), "nick": msg.get("nick")}
+        nick = node.get("nick")
+        self.display.add_raw(f"* mesh node left: {nick}")
+        if self.viz is not None:
+            # window snapshots its position now (before the state push
+            # below removes it), so it can fade a marker where it stood
+            self.viz.push_leave(node)
+        if node.get("id") is not None:
+            self._nodes_map.pop(node["id"], None)
+        self._peers = [p for p in self._peers if p != node.get("id")]
+        self.refresh_status()
+        self._viz_push_state()
 
     async def on_relay(self, msg):
         abbr = (msg.get("id") or "")[:6]
         self.display.set_activity(
             f"packet {abbr} hop {msg.get('hop')}/{msg.get('hops')} forwarding via {msg.get('via')}"
         )
+        if self.viz is not None:
+            self.viz.push_relay(msg)
 
     async def on_message(self, msg):
         route = msg.get("route") or []
@@ -172,6 +196,8 @@ class App:
         )
         if route:
             self.display.set_activity("arrived via " + " -> ".join(route))
+        if self.viz is not None:
+            self.viz.push_arrival(msg)
 
     async def on_ack(self, msg):
         to = msg.get("to")
@@ -179,6 +205,41 @@ class App:
         detail = f"[{hops_str(msg.get('hops'))}: {' -> '.join(route)}]" if route else ""
         self.display.add_raw(f"ack: delivered to {to} {detail}", kind="ok")
         self.display.set_activity(f"delivered to {to} {detail}")
+        if self.viz is not None:
+            self.viz.push_arrival(msg)
+
+    async def _wire_cmd(self, cmd: str, rest: str):
+        """/dc and /cn: snip or re-attach a wire in the mesh."""
+        bits = rest.split()
+        if len(bits) == 1:
+            if self._self is None:
+                self.display.add_raw("not connected to a mesh yet")
+                return
+            a, b = self._self["nick"], bits[0]
+        elif len(bits) == 2:
+            a, b = bits
+        else:
+            self.display.add_raw(f"usage: {cmd} <nick>   (your wire to that node)", kind="?")
+            self.display.add_raw(f"       {cmd} <a> <b>   (any wire in the mesh)", kind="?")
+            return
+        known = {(n.get("nick") or "").casefold() for n in self._nodes_map.values()}
+        for name in (a, b):
+            if name.casefold() not in known:
+                self.display.add_raw(f"no such node: {name}")
+                return
+        kind = "cut" if cmd in ("/dc", "/disconnect") else "link"
+        try:
+            await self.client.wire(kind, a, b)
+        except (ConnectionError, RuntimeError):
+            self.display.add_raw("connection lost")
+
+    async def on_wire(self, msg):
+        verb = "snipped" if msg.get("action") == "cut" else "re-attached"
+        by = msg.get("by")
+        self.display.add_raw(
+            f"* wire {msg.get('a')} <-> {msg.get('b')} {verb}" + (f" by {by}" if by else ""),
+            kind="?",
+        )
 
     async def on_error(self, msg):
         reason = msg.get("reason", "unknown")
@@ -190,6 +251,50 @@ class App:
             return
         self.display.add_raw(f"error: {reason}", kind="!")
 
+    # ---- live mesh window ---------------------------------------
+    @staticmethod
+    def _meshwindow_mod():
+        """Import the window module lazily (keeps tkinter out of startup)."""
+        try:
+            from . import meshwindow
+
+            return meshwindow
+        except Exception:
+            return None
+
+    def _edges(self):
+        edges = set()
+        for nd in self._nodes_map.values():
+            for pid in nd.get("peers", []):
+                if pid in self._nodes_map:
+                    edges.add(tuple(sorted((nd["id"], pid))))
+        return sorted(edges)
+
+    def _viz_push_state(self):
+        """Send the current topology to the window (no-op until /show)."""
+        if self.viz is None:
+            return
+        self.viz.push_state(
+            list(self._nodes_map.values()),
+            self._edges(),
+            self._self["id"] if self._self else None,
+        )
+
+    def _viz_open(self, mw):
+        """Open (or re-raise) the live window; None -> caller uses ASCII."""
+        if self.viz is None or not self.viz.alive:
+            try:
+                w = mw.MeshWindow()
+                if not w.start(timeout=3.0):
+                    return None
+                self.viz = w
+            except Exception:
+                self.viz = None
+                return None
+        self.viz.raise_window()
+        self._viz_push_state()
+        return self.viz
+
     async def on_show(self):
         if self._self is None:
             self.display.add_raw("not connected to a mesh yet", kind="?")
@@ -198,16 +303,22 @@ class App:
         if not nodes:
             self.display.add_raw("no mesh data yet", kind="?")
             return
-        edges = set()
-        for nd in nodes:
-            for pid in nd.get("peers", []):
-                if pid in self._nodes_map:
-                    edges.add(tuple(sorted((nd["id"], pid))))
+        # Live window first; the ASCII map stays as the fallback for
+        # --plain, machines without tkinter, or a window that failed to open.
+        if not isinstance(self.display, PlainUI):
+            mw = self._meshwindow_mod()
+            if mw is not None and mw.available() and self._viz_open(mw) is not None:
+                self.display.add_raw(
+                    "mesh window open -- it updates live as nodes and packets change",
+                    kind="?",
+                )
+                return
+        edges = self._edges()
         cols, rows = term_size()
-        width = min(max(cols - 2, 40), 86)
-        height = min(max(rows - 8, 10), 20)
+        width = min(max(cols - 2, 16), 86)
+        height = min(max(rows - 8, 8), 20)
         for line in render_mesh(nodes, sorted(edges), self_id=self._self["id"], width=width, height=height):
-            self.display.add_raw(line, kind="?")
+            self.display.add_raw(line, kind="map")
 
     async def on_closed(self):
         self.display.add_raw("connection to mesh server closed")
@@ -265,6 +376,7 @@ async def run(args) -> int:
         ("relay", app.on_relay),
         ("message", app.on_message),
         ("ack", app.on_ack),
+        ("wire", app.on_wire),
         ("error", app.on_error),
     ]:
         app.client.on(kind, cb)
@@ -316,6 +428,8 @@ async def run(args) -> int:
     finally:
         if app.keys:
             app.keys.stop()
+        if app.viz is not None:
+            app.viz.close()
         app.terminal.restore()
         sys.stdout.write("\r\n")
         sys.stdout.flush()

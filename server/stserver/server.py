@@ -59,6 +59,7 @@ class ChatServer:
         self._by_nick: dict[str, int] = {}
         self._next_id = 1
         self._server: asyncio.Server | None = None
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     async def start(self) -> None:
@@ -101,6 +102,8 @@ class ChatServer:
             await self._server.serve_forever()
 
     async def shutdown(self) -> None:
+        for task in list(self._bg_tasks):
+            task.cancel()
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -148,7 +151,9 @@ class ChatServer:
             pass
         finally:
             if node_id is not None:
-                self._drop(node_id)
+                nick_left = self._drop(node_id)
+                if nick_left is not None:
+                    self._spawn_leave(node_id, nick_left)
             try:
                 writer.close()
             except Exception:
@@ -228,6 +233,11 @@ class ChatServer:
                     await self._handle_send(node, msg)
                 except (ConnectionError, OSError, RuntimeError):
                     return
+            elif mtype in ("cut", "link"):
+                try:
+                    await self._handle_wire(node, msg)
+                except (ConnectionError, OSError, RuntimeError):
+                    return
             elif mtype == "bye":
                 return
             elif mtype == "ping":
@@ -255,6 +265,58 @@ class ChatServer:
             return
         await self._relay(src, dst, body, msg_id)
 
+    async def _handle_wire(self, src: "Node", msg: dict) -> None:
+        """Snip (``cut``) or re-attach (``link``) a wire between two nodes.
+
+        Anyone may reshape the mesh -- it is the shared simulation. The
+        ``wire`` event only carries the chat-log line, so it goes just to
+        the parties who care (snip: the operator alone; link: both ends of
+        the wire, plus the operator); the fresh topology push still
+        reaches every node, so all maps and status bars update either way.
+        """
+        action = msg.get("type")
+        a_nick = str(msg.get("a") or "").strip()
+        b_nick = str(msg.get("b") or "").strip()
+
+        def resolve(nick: str) -> int | None:
+            return self._by_nick.get(self._nick_key(nick))
+
+        ia, ib = resolve(a_nick), resolve(b_nick)
+        if ia is None or ib is None:
+            missing = a_nick if ia is None else b_nick
+            await self._safe_send(src, {"type": "error", "reason": f"no such node: {missing}"})
+            return
+        if ia == ib:
+            await self._safe_send(src, {"type": "error", "reason": "a wire needs two different nodes"})
+            return
+        if action == "cut":
+            ok = self.mesh.cut(ia, ib)
+            failure = f"no such wire: {a_nick} <-> {b_nick}"
+        else:  # "link"
+            ok = self.mesh.link(ia, ib)
+            failure = f"wire already exists: {a_nick} <-> {b_nick}"
+        if not ok:
+            await self._safe_send(src, {"type": "error", "reason": failure})
+            return
+
+        wire = {"type": "wire", "action": action, "a": a_nick, "b": b_nick, "by": src.nick}
+        # Send the chat-log line only to the parties who care (see
+        # docstring); _announce() below still pushes topology to everyone.
+        targets: dict[int, "Node"] = {src.node_id: src}
+        if action == "link":
+            targets[ia] = self.mesh.nodes[ia]
+            targets[ib] = self.mesh.nodes[ib]
+        for target in targets.values():
+            await self._safe_send(target, wire)
+        await self._announce()
+        log.info(
+            "wire %s <-> %s %s by %s",
+            a_nick,
+            b_nick,
+            "snipped" if action == "cut" else "linked",
+            src.nick,
+        )
+
     async def _relay(self, src: Node, dst: Node, body: str, msg_id: str) -> None:
         """Store-and-forward a unicast packet through the mesh graph."""
         router = self.mesh.route(src.node_id, dst.node_id)
@@ -264,8 +326,11 @@ class ChatServer:
         names = [self.mesh.nick_of(i) for i in router]
         hops = len(router) - 1
 
-        # forward through each intermediate node; propagate latency per hop
-        for idx in range(1, hops):
+        # Forward hop-by-hop. A relay tick is broadcast to EVERY node (not
+        # just the sender) so each client's live mesh view can animate the
+        # packet walking through the network -- including the final delivery
+        # hop (hop == hops), which immediately precedes message/ack.
+        for idx in range(1, hops + 1):
             mid = router[idx]
             await asyncio.sleep(self._hop_delay())
             tick = {
@@ -277,11 +342,9 @@ class ChatServer:
                 "hops": hops,
                 "via": self.mesh.nick_of(mid),
             }
-            await self._safe_send(src, tick)
-            if mid != dst.node_id:
-                await self._safe_send(self.mesh.nodes.get(mid), tick)
+            for nid in list(self.mesh._order):
+                await self._safe_send(self.mesh.nodes.get(nid), tick)
 
-        await asyncio.sleep(self._hop_delay())
         await self._safe_send(
             dst,
             {
@@ -332,16 +395,42 @@ class ChatServer:
             node.writer.write((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
             await node.writer.drain()
         except (ConnectionError, OSError, RuntimeError):
-            self._drop(node.node_id)
+            nick = self._drop(node.node_id)
+            if nick is not None:
+                self._spawn_leave(node.node_id, nick)
 
-    def _drop(self, node_id: int) -> None:
+    def _drop(self, node_id: int) -> str | None:
+        """Remove a departed node. Returns its nick if it was still present."""
         if node_id not in self.mesh.nodes:
-            return
+            return None
         nick = self.mesh.nick_of(node_id)
         self.mesh.remove(node_id)
         if self._nick_key(nick) in self._by_nick:
             del self._by_nick[self._nick_key(nick)]
         log.info("node %d (%s) left; %d remain", node_id, nick, len(self.mesh.nodes))
+        return nick
+
+    def _spawn_leave(self, node_id: int, nick: str) -> None:
+        """Announce a departure without blocking (or recursing into) the caller."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._leave_notice(node_id, nick))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: asyncio.Task) -> None:
+        self._bg_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()  # retrieve silently: dead-peer races are expected
+
+    async def _leave_notice(self, node_id: int, nick: str) -> None:
+        """Tell every remaining node someone left, then push the new topology."""
+        msg = {"type": "node_leave", "node": {"id": node_id, "nick": nick}}
+        for nid in list(self.mesh._order):
+            await self._safe_send(self.mesh.nodes.get(nid), msg)
+        await self._announce()
 
 
 def run(host: str = "127.0.0.1", port: int = 8765, hop_ms: int = 120, seed: int | None = None):

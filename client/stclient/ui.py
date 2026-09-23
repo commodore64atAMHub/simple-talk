@@ -100,7 +100,11 @@ class ChatUI:
         self._schedule_redraw()
 
     def add_raw(self, text: str, kind: str = "*") -> None:
-        self.log.append((time.strftime("%H:%M:%S"), kind, text))
+        # "map" rows are a fixed-column diagram: no timestamp (keeps the
+        # block aligned) and ChatUI must not re-wrap them (wrap() collapses
+        # runs of spaces, which would destroy the drawing).
+        ts = "" if kind == "map" else time.strftime("%H:%M:%S")
+        self.log.append((ts, kind, text))
         self._schedule_redraw()
 
     # -- key events (from background thread, via call_soon_threadsafe) --
@@ -170,6 +174,11 @@ class ChatUI:
         log_rows = rows - 3
         rendered = []
         for ts, kind, text in self.log:
+            if kind == "map":
+                # Fixed-column drawing: keep text exactly as-is (wrapping
+                # would strip the leading/interior spaces it is built from).
+                rendered.append((ts, kind, text))
+                continue
             for line in wrap(text, cols - 10):
                 rendered.append((ts, kind, line))
         tail = rendered[-log_rows:]
@@ -221,7 +230,10 @@ class PlainUI:
         self.activity = text
 
     def add_raw(self, text: str, kind: str = "*") -> None:
-        self._print(f"{time.strftime('%H:%M:%S')}  {text}")
+        if kind == "map":
+            self._print(text)
+        else:
+            self._print(f"{time.strftime('%H:%M:%S')}  {text}")
 
     @staticmethod
     def _print(text: str) -> None:

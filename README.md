@@ -67,7 +67,9 @@ Notes on cross-platform builds:
   auto-enables VT processing on console.
 * The client is pure standard library — no pip deps to bundle — so the
   onefile binary stays small (a few MB compressed with `nuitka[onefile]`,
-  which pulls in `zstandard`).
+  which pulls in `zstandard`). This includes the tkinter mesh window;
+  on Linux distributions that ship `python3-tk` separately, `/show`
+  simply falls back to the ASCII map.
 
 ## Commands
 
@@ -75,9 +77,24 @@ Notes on cross-platform builds:
 | ----------------- | ----------------------------------------- |
 | `any text`        | broadcast to every node on the mesh       |
 | `/msg <nick> ...` | route a unicast message via the mesh      |
-| `/show`           | draw the current mesh (nodes + links)     |
+| `/show`           | open the live mesh window (ASCII map in `--plain`) |
+| `/dc <nick>`      | snip a wire — traffic reroutes around it |
+| `/cn <nick>`      | re-attach a snipped wire                  |
 | `/help`           | list commands                             |
 | `/quit`           | leave (Ctrl-D / Ctrl-C also work)         |
+
+Wire confirmations stay between the right people: a `/dc` snip prints only
+on the operator's screen, while a `/cn` re-attach prints for both ends of
+the new wire. Every map and status bar still updates either way.
+
+`/show` opens a live window (tkinter — still pure standard library, no pip
+deps) showing nodes as labelled circles with your node highlighted. It
+redraws itself when nodes join or leave, fades a marker where a departed
+node stood (the log shows `* mesh node left: <nick>`), and animates every
+packet walking hop-by-hop along its route; close it whenever you like. It
+falls back to an
+ASCII map in the log under `--plain`, on a Python built without tkinter, or
+if the window fails to open.
 
 ## Server options
 
@@ -134,18 +151,25 @@ Common reasons two school laptops can't talk even with `--host 0.0.0.0`:
 
 2. **Routing.** Unicast messages are routed through the graph with a BFS
    shortest path. Each hop costs a simulated transmission delay, and the
-   server emits a `relay` event per hop so senders (and intermediate nodes)
-   see the packet traversing the mesh. Broadcasts flood to every node.
+   server emits a `relay` event per hop to every node, so any client's
+   live mesh window can animate the packet traversing the mesh.
+   Broadcasts flood to every node. Anyone can reshape the graph live
+   with `/dc` and `/cn`: snip and re-attach wires until you have your
+   own topology — bus, ring, star, full mesh — and watch routing follow
+   the shape you built (or fail with `no route` when you isolate a
+   node). Manual edits take over from the automatic ring/shortcut
+   links, so nothing you didn't ask for pops back in.
 
 3. **Wire protocol.** Newline-delimited JSON over TCP
    (`client/stclient/protocol.py`, `server/stserver/protocol.py`):
    `hello`, `welcome`, `peers`, `node_map`, `node_join`, `node_leave`,
-   `send`, `relay`, `message`, `ack`, `error`.
+   `send`, `relay`, `message`, `ack`, `cut`, `link`, `wire`, `error`.
 
 ## Layout
 
 ```
-client/            client package: net.py, ui.py, protocol.py, __main__.py
+client/            client package: net.py, ui.py, protocol.py,
+                   meshview.py (ASCII map), meshwindow.py (live GUI), __main__.py
 server/            mesh sim: mesh.py, server.py, __main__.py, protocol.py
 scripts/           smoke_test.py (end-to-end test over the real protocol)
 Makefile           cross-platform build + dev/test targets

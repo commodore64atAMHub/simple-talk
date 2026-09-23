@@ -9,7 +9,9 @@ per-hop transmission delay.
 
 This makes ordinary chat behave like a store-and-forward mesh radio
 network: messages take real time to hop through intermediate nodes, and
-every node only ever "talks" to its direct neighbours.
+every node only ever "talks" to its direct neighbours.  Wires can also
+be snipped and re-attached at runtime (``Mesh.cut``/``Mesh.link``) to
+watch how routing adapts -- or fails -- around the damage.
 """
 
 from __future__ import annotations
@@ -40,6 +42,15 @@ class Mesh:
         self.nodes: dict[int, Node] = {}
         self.adj: dict[int, set[int]] = {}
         self._order: list[int] = []
+        # Manual wire edits (snipped/restored by clients via cut/link).
+        # Stored as overlays so they survive every rebuild() -- including
+        # re-rolled random shortcuts -- until explicitly changed again.
+        self._cuts: set[tuple[int, int]] = set()
+        self._links: set[tuple[int, int]] = set()
+
+    @staticmethod
+    def _pair(a: int, b: int) -> tuple[int, int]:
+        return (a, b) if a <= b else (b, a)
 
     # ---- node placement (deterministic per id) -----------------------
     @staticmethod
@@ -60,27 +71,92 @@ class Mesh:
             del self.nodes[node_id]
         if node_id in self._order:
             self._order.remove(node_id)
+        self._cuts = {p for p in self._cuts if node_id not in p}
+        self._links = {p for p in self._links if node_id not in p}
         self.rebuild()
 
     def rebuild(self) -> None:
-        """(Re)compute adjacency for every node."""
+        """(Re)compute adjacency for every node.
+
+        Once someone has sculpted the mesh by hand (``_cuts``/``_links``
+        non-empty) the existing shape is preserved -- only wires of
+        departed nodes are pruned, newcomers get one default wire -- so
+        the auto-generated ring/shortcut links can never re-appear on
+        top of what someone deliberately snipped. This is what lets
+        people carve their own topology (bus, ring, star, full mesh...)
+        with cut/link. Fully automatic meshes keep the original
+        ring + random-shortcut behaviour.
+        """
         ids = self._order
         n = len(ids)
-        adj = {i: set() for i in ids}
-        if n > 1:
-            k = min(self.ring_degree, n - 1)
-            for idx, i in enumerate(ids):
-                for d in range(1, k + 1):
-                    adj[i].add(ids[(idx - d) % n])
-                    adj[i].add(ids[(idx + d) % n])
-            existing = sum(len(s) for s in adj.values()) // 2
-            max_edges = n * (n - 1) // 2
-            extra = max(0, min(self.shortcuts, max_edges - existing))
-            for _ in range(extra):
-                a, b = self.rng.sample(ids, 2)
+        live = set(ids)
+        if self._cuts or self._links:
+            adj = {}
+            fresh = []
+            for i in ids:
+                if i in self.adj:
+                    adj[i] = {j for j in self.adj[i] if j in live}
+                else:
+                    adj[i] = set()
+                    fresh.append(i)
+            if len(ids) > 1:
+                for i in fresh:
+                    # don't strand a newcomer: one default wire to the most
+                    # recent member (the sculptor can /dc it away)
+                    prev = [j for j in ids if j != i][-1]
+                    adj[i].add(prev)
+                    adj[prev].add(i)
+        else:
+            adj = {i: set() for i in ids}
+            if n > 1:
+                k = min(self.ring_degree, n - 1)
+                for idx, i in enumerate(ids):
+                    for d in range(1, k + 1):
+                        adj[i].add(ids[(idx - d) % n])
+                        adj[i].add(ids[(idx + d) % n])
+                existing = sum(len(s) for s in adj.values()) // 2
+                max_edges = n * (n - 1) // 2
+                extra = max(0, min(self.shortcuts, max_edges - existing))
+                for _ in range(extra):
+                    a, b = self.rng.sample(ids, 2)
+                    adj[a].add(b)
+                    adj[b].add(a)
+        # Manual wire edits win over whatever base topology we just built.
+        for a, b in self._cuts:
+            if a in adj and b in adj:
+                adj[a].discard(b)
+                adj[b].discard(a)
+        for a, b in self._links:
+            if a in adj and b in adj:
                 adj[a].add(b)
                 adj[b].add(a)
         self.adj = {i: frozenset(s) for i, s in adj.items()}
+
+    # ---- manual wire edits (client /dc and /cn) ------------------------
+    def cut(self, a: int, b: int) -> bool:
+        """Snip the wire a<->b. Returns False when no such wire exists."""
+        if a == b or b not in self.adj.get(a, ()):
+            return False
+        pair = self._pair(a, b)
+        self._cuts.add(pair)
+        self._links.discard(pair)
+        self.rebuild()
+        return True
+
+    def link(self, a: int, b: int) -> bool:
+        """Re-attach (or create) the wire a<->b.
+
+        Returns False when the nodes are unknown or already linked.
+        """
+        if a == b or a not in self.nodes or b not in self.nodes:
+            return False
+        if b in self.adj.get(a, ()):
+            return False
+        pair = self._pair(a, b)
+        self._links.add(pair)
+        self._cuts.discard(pair)
+        self.rebuild()
+        return True
 
     # ---- queries ---------------------------------------------------------
     def peers_of(self, node_id: int) -> list[int]:

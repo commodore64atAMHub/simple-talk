@@ -54,6 +54,12 @@ class MeshClient:
     async def say(self, to: str, body: str) -> None:
         await self._write({"type": "send", "to": to, "body": body})
 
+    async def wire(self, kind: str, a: str, b: str) -> None:
+        """Snip (``kind="cut"``) or re-attach (``kind="link"``) a wire."""
+        if kind not in ("cut", "link"):
+            raise ValueError(f"unknown wire action: {kind}")
+        await self._write({"type": kind, "a": a, "b": b})
+
     async def bye(self) -> None:
         try:
             await self._write({"type": "bye"})
