@@ -1,0 +1,13 @@
+{
+  "name": "simple-talk-node-express",
+  "version": "1.0.0",
+  "private": true,
+  "description": "simple-talk mesh chat over HTTP -- Express edition",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.0.0"
+  }
+}

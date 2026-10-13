@@ -7,6 +7,7 @@ import logging
 import sys
 
 from . import __version__, protocol
+from .httpnet import HttpMeshClient
 from .meshview import render_mesh
 from .net import MeshClient
 from .ui import ChatUI, KeyReader, PlainUI, Terminal, enable_windows_vt, term_size
@@ -28,12 +29,34 @@ def hops_str(hops: int) -> str:
     return f"{hops} hop" + ("s" if hops != 1 else "")
 
 
+def http_url(args) -> str:
+    """The HTTP base URL, if one was asked for (``--url`` or an
+    ``http://``-style ``--host``); empty string means raw TCP."""
+    url = (getattr(args, "url", None) or "").strip()
+    if not url and args.host.startswith(("http://", "https://")):
+        url = args.host
+    return url
+
+
+def make_client(args):
+    """Pick the transport: HTTP when a URL was given, else raw TCP."""
+    url = http_url(args)
+    if url:
+        return HttpMeshClient(url)
+    return MeshClient(args.host, args.port)
+
+
+def target_of(args) -> str:
+    """What to print in 'could not connect to ...' messages."""
+    return http_url(args) or f"{args.host}:{args.port}"
+
+
 class App:
     """Wires the network client and the display together."""
 
     def __init__(self, args):
         self.args = args
-        self.client = MeshClient(args.host, args.port)
+        self.client = make_client(args)
         self.display = None
         self.keys = None
         self.terminal = None
@@ -366,6 +389,7 @@ async def run(args) -> int:
     loop = asyncio.get_running_loop()
     app.display = make_display(app, args, loop)
     plain = isinstance(app.display, PlainUI)
+    target = target_of(args)
 
     for kind, cb in [
         ("welcome", app.on_welcome),
@@ -392,18 +416,29 @@ async def run(args) -> int:
         try:
             await app.client.connect(args.nick, timeout=args.timeout)
         except (TimeoutError, asyncio.TimeoutError):
-            print(
-                f"timed out after {args.timeout:g}s waiting for {args.host}:{args.port} -- the server is not answering.\n"
-                "  check that:\n"
-                f"    - the server was started with --host 0.0.0.0 (default {args.host} is loopback-only)\n"
-                "    - you used the right address from ipconfig (IPv4 of the ACTIVE adapter, not a VPN/Hyper-V one)\n"
-                "    - Windows Firewall allows the server on inbound Private networks\n"
-                "    - the network permits device-to-device traffic (school/guest wifi often isolates clients -- try a hotspot)",
-                file=sys.stderr,
-            )
+            if http_url(args):
+                print(
+                    f"timed out after {args.timeout:g}s waiting for {target} -- the HTTP server is not answering.\n"
+                    "  check that:\n"
+                    f"    - the HTTP server is running (python3 server/http.py, default {protocol.DEFAULT_HTTP_URL})\n"
+                    "    - the URL is right, including scheme and port (e.g. --url http://127.0.0.1:8080)\n"
+                    "    - the server was started with --host 0.0.0.0 if you are on another machine\n"
+                    "    - nothing (firewall, school wifi) is blocking inbound HTTP",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"timed out after {args.timeout:g}s waiting for {target} -- the server is not answering.\n"
+                    "  check that:\n"
+                    f"    - the server was started with --host 0.0.0.0 (default {args.host} is loopback-only)\n"
+                    "    - you used the right address from ipconfig (IPv4 of the ACTIVE adapter, not a VPN/Hyper-V one)\n"
+                    "    - Windows Firewall allows the server on inbound Private networks\n"
+                    "    - the network permits device-to-device traffic (school/guest wifi often isolates clients -- try a hotspot)",
+                    file=sys.stderr,
+                )
             return 1
         except (OSError, ConnectionError) as exc:
-            print(f"could not connect to {args.host}:{args.port}: {exc}", file=sys.stderr)
+            print(f"could not connect to {target}: {exc}", file=sys.stderr)
             return 1
 
         reader_task = asyncio.create_task(app.client.run())
@@ -438,8 +473,9 @@ async def run(args) -> int:
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="simple-talk", description="mesh-network chat client")
-    p.add_argument("--host", default="127.0.0.1", help="mesh server host (default 127.0.0.1)")
+    p.add_argument("--host", default="127.0.0.1", help="mesh server host (default 127.0.0.1); an http:// URL here selects the HTTP transport")
     p.add_argument("--port", type=int, default=protocol.DEFAULT_PORT, help="mesh server port (default %(default)s)")
+    p.add_argument("--url", default=None, help=f"connect over HTTP instead of raw TCP, e.g. {protocol.DEFAULT_HTTP_URL} (server/http.py or a template from templates/)")
     p.add_argument("--nick", default=getpass.getuser(), help="nickname (default: current user)")
     p.add_argument("--timeout", type=float, default=10.0, help="seconds to wait for the server to accept the connection (default %(default)s)")
     p.add_argument("--plain", action="store_true", help="force plain line mode (no TUI)")

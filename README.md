@@ -29,6 +29,10 @@ Type a line to **broadcast** to the whole mesh; `/msg bob hello` to route a
 message to one node. Watch the status line and per-hop activity as packets
 hop node-to-node.
 
+TCP not your thing (firewall, proxy, a locked-down network, a browser
+tab)? The same chat also runs over HTTP — see
+[HTTP mode](#http-mode-when-tcp-is-annoying).
+
 ### Building the single-binary client (and server)
 
 Requires a C toolchain (gcc/clang/MSVC) and `pip install nuitka`.
@@ -38,13 +42,15 @@ make deps          # pip install "nuitka[onefile]" (+ patchelf on Linux)
 make               # generic build: compiles both binaries (same as `make all`)
 make client        # -> dist/simple-talk        (Windows: dist/simple-talk.exe)
 make server        # -> dist/simple-talk-server
-make all           # both
+make server-http   # -> dist/simple-talk-http-server   (the HTTP server)
+make all           # both of the TCP pair
 
 make install       # build, then install binaries into ~/.local/bin
 make install PREFIX=/usr/local     # or a custom prefix
 make uninstall     # remove installed binaries
 
 make test          # end-to-end smoke test of the mesh
+make test-http     # conformance test of the HTTP server + client
 make run -- --nick alice          # run the built client binary
 make run-server                   # run the built server binary
 make clean
@@ -104,6 +110,55 @@ python3 server/main.py --help
   --port PORT      listen port             (default 8765)
   --hop-ms N       simulated per-hop latency in ms (default 120)
   --seed N         fix the random topology
+```
+
+## HTTP mode (when TCP is annoying)
+
+Sometimes a raw socket is the annoying part: a firewall rule, a proxy,
+a school network, a browser tab. `server/http.py` runs the **same mesh
+simulation** over a small JSON API instead:
+
+```sh
+# terminal 1: the HTTP server (default port 8080, not 8765)
+python3 server/http.py
+
+# terminal 2+: the very same TUI, pointed at a URL
+python3 client/main.py --url http://127.0.0.1:8080 --nick alice
+
+# ...or just open the chat page the server hosts at /
+open http://127.0.0.1:8080/
+```
+
+It takes the same flags as `server/main.py` (`--host`, `--port`,
+`--hop-ms`, `--seed`, `--log-level` — plus `--ui` to pick which HTML
+file is served at `/`) and speaks the identical event frames, so every
+command, the `/show` mesh window and the whole TUI behave exactly as
+over TCP — only the transport differs. The browser page is the same
+chat from a third kind of client: join, broadcast, `/msg`, `/dc`,
+`/cn`, `/part`.
+
+The API contract — endpoints, event frames, behavioural rules — is
+documented in [`templates/README.md`](templates/README.md). That
+directory holds interchangeable, copy-paste single-file servers in
+other frameworks and languages; each one is the same chat, drop-in
+behind the same URL:
+
+| Template                  | Needs                          |
+| ------------------------- | ------------------------------ |
+| `templates/python_stdlib` | nothing (Python standard lib)  |
+| `templates/python_flask`  | `pip install flask`            |
+| `templates/python_fastapi`| `pip install fastapi uvicorn`  |
+| `templates/node_http`     | nothing (Node's `http` module) |
+| `templates/node_express`  | `npm install express`          |
+| `templates/go_nethttp`    | nothing (Go `net/http`)        |
+| `templates/browser`       | the chat page itself (served by every server at `/`) |
+
+Every implementation — theirs, yours, or `server/http.py` — is checked
+by one conformance test:
+
+```sh
+python3 scripts/http_smoke_test.py                                        # server/http.py
+python3 scripts/http_smoke_test.py --cmd "node templates/node_http/server.js --port {port}"
 ```
 
 ## Playing across machines (LAN)
@@ -168,9 +223,15 @@ Common reasons two school laptops can't talk even with `--host 0.0.0.0`:
 ## Layout
 
 ```
-client/            client package: net.py, ui.py, protocol.py,
-                   meshview.py (ASCII map), meshwindow.py (live GUI), __main__.py
-server/            mesh sim: mesh.py, server.py, __main__.py, protocol.py
-scripts/           smoke_test.py (end-to-end test over the real protocol)
+client/            client: main.py (entry) + stclient/ package:
+                   net.py (TCP transport), httpnet.py (HTTP transport),
+                   ui.py, protocol.py, meshview.py (ASCII map),
+                   meshwindow.py (live GUI), __main__.py
+server/            server: main.py (TCP entry), http.py (HTTP entry) +
+                   stserver/ package: mesh.py, server.py (TCP engine),
+                   httpchat.py, httpserv.py (HTTP engine), protocol.py
+templates/         interchangeable HTTP servers + browser chat page
+                   (see templates/README.md)
+scripts/           smoke_test.py (TCP end-to-end), http_smoke_test.py (HTTP conformance)
 Makefile           cross-platform build + dev/test targets
 ```

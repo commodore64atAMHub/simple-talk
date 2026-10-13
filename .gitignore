@@ -9,5 +9,9 @@ __pycache__/
 .venv/
 venv/
 
+# node (templates that need npm)
+node_modules/
+package-lock.json
+
 # editors / OS
 .DS_Store

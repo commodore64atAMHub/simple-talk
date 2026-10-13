@@ -17,8 +17,10 @@ DESTDIR ?=
 
 CLIENT_MAIN := client/main.py
 SERVER_MAIN := server/main.py
+HTTP_MAIN   := server/http.py
 CLIENT_BIN  := $(OUT)/simple-talk
 SERVER_BIN  := $(OUT)/simple-talk-server
+HTTP_BIN    := $(OUT)/simple-talk-http-server
 
 # Nuitka options shared by both binaries.
 #   --onefile                  -> a single self-contained executable
@@ -27,7 +29,7 @@ SERVER_BIN  := $(OUT)/simple-talk-server
 #   --remove-output            -> delete intermediate build dir after success
 NUITKA_FLAGS := --onefile --assume-yes-for-downloads --lto=yes --remove-output --output-dir=$(OUT)
 
-.PHONY: default all client server deps install uninstall test dev run dev-server run-server clean help
+.PHONY: default all client server server-http deps install uninstall test test-http dev run dev-server run-server dev-http-server run-http-server clean help
 
 ## default: generic build -- compile both binaries (same as `make all`)
 default: all
@@ -47,6 +49,10 @@ client:
 ## server: build the server binary with Nuitka (source-only is fine too)
 server:
 	$(NUITKA) $(NUITKA_FLAGS) --output-filename=simple-talk-server $(SERVER_MAIN)
+
+## server-http: build the HTTP server binary with Nuitka (optional; not part of `all`)
+server-http:
+	$(NUITKA) $(NUITKA_FLAGS) --output-filename=simple-talk-http-server $(HTTP_MAIN)
 
 ## install: build if needed, then install binaries into $(PREFIX)/bin
 install: all
@@ -74,9 +80,22 @@ run-server:
 	@if [ -x $(SERVER_BIN) ] || [ -f $(SERVER_BIN) ]; then $(SERVER_BIN) $(ARGS); \
 	else echo "no binary built yet -- running from source"; $(PY) $(SERVER_MAIN) $(ARGS); fi
 
+## dev-http-server: run the HTTP mesh server from source (default port 8080)
+dev-http-server:
+	$(PY) $(HTTP_MAIN) $(ARGS)
+
+## run-http-server: run the built HTTP server binary if present, else fall back to source
+run-http-server:
+	@if [ -x $(HTTP_BIN) ] || [ -f $(HTTP_BIN) ]; then $(HTTP_BIN) $(ARGS); \
+	else echo "no binary built yet -- running from source"; $(PY) $(HTTP_MAIN) $(ARGS); fi
+
 ## test: end-to-end smoke test (exit 0 on success)
 test:
 	$(PY) scripts/smoke_test.py
+
+## test-http: HTTP conformance test -- server, client transport, browser contract
+test-http:
+	$(PY) scripts/http_smoke_test.py $(ARGS)
 
 ## clean: remove build outputs and caches
 clean:

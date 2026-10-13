@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>simple-talk &middot; browser node</title>
+<style>
+  :root {
+    --bg: #101418; --panel: #161b22; --line: #262d38; --text: #cdd6d4;
+    --dim: #7f8a99; --blue: #89b4fa; --cyan: #89dceb; --red: #f38ba8;
+    --green: #a6e3a1; --yellow: #f9e2af;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 1rem;
+    padding: .6rem 1rem; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: .95rem; margin: 0; color: var(--blue); font-weight: 600; }
+  #dot { color: var(--dim); }
+  #dot.on { color: var(--green); }
+  #nickhead { color: var(--cyan); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #room { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #log { flex: 1; overflow-y: auto; padding: .8rem 1rem; white-space: pre-wrap; word-break: break-word; }
+  #log .t { color: var(--dim); }
+  #log .self { color: var(--cyan); }
+  #log .sys  { color: var(--yellow); }
+  #log .err  { color: var(--red); }
+  #log .ack  { color: var(--green); }
+  #log .priv { color: #cba6f7; }
+  #composer { display: flex; border-top: 1px solid var(--line); background: var(--panel); }
+  #line {
+    flex: 1; background: transparent; border: 0; outline: none; color: var(--text);
+    font: inherit; padding: .7rem 1rem;
+  }
+  #send {
+    background: transparent; border: 0; color: var(--blue); font: inherit;
+    padding: 0 1rem; cursor: pointer;
+  }
+  #send:hover { color: var(--cyan); }
+  #status {
+    padding: .35rem 1rem; border-top: 1px solid var(--line); color: var(--dim);
+    min-height: 1.7rem; font-size: .92em;
+  }
+  #status .packet { color: var(--yellow); }
+  aside {
+    width: 15rem; border-left: 1px solid var(--line); background: var(--panel);
+    padding: .8rem 1rem; overflow-y: auto; flex-shrink: 0;
+  }
+  aside h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
+             color: var(--dim); margin: 0 0 .6rem; }
+  aside ul { list-style: none; margin: 0; padding: 0; }
+  aside li { padding: .3rem 0; border-bottom: 1px dashed var(--line); }
+  aside .me { color: var(--cyan); }
+  aside .nb { color: var(--dim); font-size: .9em; display: block; }
+  aside .iso { color: var(--red); }
+  /* join form */
+  #join {
+    margin: auto; width: min(30rem, 92vw); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 1.4rem 1.6rem;
+  }
+  #join h1 { margin: 0 0 .3rem; font-size: 1.15rem; color: var(--blue); }
+  #join p { margin: .2rem 0 .9rem; color: var(--dim); font-size: .92em; }
+  #join label { display: block; color: var(--dim); font-size: .85em; margin: .7rem 0 .2rem; }
+  #join input {
+    width: 100%; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 4px; color: var(--text); font: inherit; padding: .5rem .6rem;
+  }
+  #join input:focus { outline: none; border-color: var(--blue); }
+  #join button {
+    margin-top: 1.1rem; width: 100%; background: var(--blue); color: #0b0e12;
+    border: 0; border-radius: 4px; font: inherit; font-weight: 600;
+    padding: .55rem; cursor: pointer;
+  }
+  #join button:hover { background: var(--cyan); }
+  #joinerr { color: var(--red); min-height: 1.2em; margin-top: .6rem; font-size: .92em; }
+  #leave {
+    background: transparent; border: 0; color: var(--dim); font: inherit;
+    cursor: pointer; margin-left: auto; padding: 0 .2rem;
+  }
+  #leave:hover { color: var(--red); }
+  @media (max-width: 46rem) { aside { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>simple-talk &rarr; browser node</h1>
+  <span id="dot">&#9679;</span> <span id="connstate">offline</span>
+  <span id="nickhead"></span>
+  <button id="leave" title="leave the mesh" hidden>&times; leave</button>
+</header>
+
+<main>
+  <form id="join">
+    <h1>join the mesh</h1>
+    <p>Runs against any simple-talk HTTP server: <code>server/http.py</code>
+       or any template in <code>templates/</code>. Works from a
+       <code>file://</code> page too (servers send CORS headers).</p>
+    <label for="url">server url</label>
+    <input id="url" spellcheck="false" autocomplete="off">
+    <label for="nick">nick</label>
+    <input id="nick" maxlength="24" spellcheck="false" autocomplete="off" autofocus>
+    <div id="joinerr"></div>
+    <button type="submit" id="connectbtn">connect</button>
+  </form>
+
+  <section id="room" hidden>
+    <div id="log"></div>
+    <form id="composer">
+      <input id="line" placeholder="say something &mdash; /help for commands"
+             spellcheck="false" autocomplete="off">
+      <button id="send" type="submit">send</button>
+    </form>
+    <div id="status"></div>
+  </section>
+
+  <aside id="sidebar" hidden>
+    <h2>nodes &amp; wires</h2>
+    <ul id="nodes"></ul>
+  </aside>
+</main>
+
+<script>
+"use strict";
+/* Browser node for simple-talk's HTTP transport: joins via POST /api/hello,
+   then long-polls GET /api/events -- the exact frames the TCP client gets
+   (see templates/README.md for the contract). Commands mirror the TUI. */
+
+const $ = (sel) => document.querySelector(sel);
+const HELP = "commands: <b>type</b> = broadcast, <b>/msg &lt;nick&gt; &lt;text&gt;</b> = unicast, " +
+             "<b>/dc &lt;a&gt; &lt;b&gt;</b> = snip wire, <b>/cn &lt;a&gt; &lt;b&gt;</b> = re-attach, " +
+             "<b>/help</b>, <b>/part</b> = leave";
+
+const S = {
+  url: "", token: null, since: 0, self: null, nodes: [], peers: [],
+  connected: false, seq: 0,
+};
+
+/* ---------- plumbing ---------- */
+async function api(path, payload) {
+  const opts = { method: payload ? "POST" : "GET", headers: { "Content-Type": "application/json" } };
+  if (payload) opts.body = JSON.stringify(payload);
+  const res = await fetch(S.url + path, opts);
+  let body = {};
+  try { body = await res.json(); } catch { /* empty/non-JSON body */ }
+  return { status: res.status, body };
+}
+
+const esc = (s) => String(s);
+
+function log(text, cls) {
+  const el = document.createElement("div");
+  const t = document.createElement("span");
+  t.className = "t";
+  t.textContent = new Date().toTimeString().slice(0, 8) + " ";
+  el.append(t);
+  if (cls) el.className = cls;
+  el.append(document.createTextNode(text));
+  const box = $("#log");
+  box.append(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+function status(text, cls) {
+  const el = $("#status");
+  el.textContent = "";
+  if (cls) { const s = document.createElement("span"); s.className = cls; s.textContent = text; el.append(s); }
+  else el.textContent = text;
+}
+
+function hopsStr(n) { return n === 1 ? "1 hop" : n + " hops"; }
+
+function renderSidebar() {
+  const ul = $("#nodes");
+  ul.textContent = "";
+  const byId = new Map(S.nodes.map((n) => [n.id, n]));
+  for (const n of S.nodes) {
+    const li = document.createElement("li");
+    const me = S.self && n.id === S.self.id;
+    const name = document.createElement("span");
+    name.className = me ? "me" : "";
+    name.textContent = n.nick + (me ? " (you)" : "");
+    li.append(name);
+    const nb = document.createElement("span");
+    const names = (n.peers || []).map((p) => (byId.get(p) || { nick: "?" + p }).nick);
+    if (!names.length) { nb.className = "iso"; nb.textContent = "isolated"; }
+    else { nb.className = "nb"; nb.textContent = "↔ " + names.join(", "); }
+    li.append(nb);
+    ul.append(li);
+  }
+  const me = S.self ? S.nodes.find((n) => n.id === S.self.id) : null;
+  const mine = me ? (me.peers || []).length : 0;
+  $("#nickhead").textContent = S.self
+    ? `${S.self.nick} @ node ${S.self.id} · ${S.nodes.length} online · ${mine} wire${mine === 1 ? "" : "s"}`
+    : "";
+}
+
+/* ---------- events ---------- */
+function handle(ev) {
+  switch (ev.type) {
+    case "welcome": {
+      S.self = ev.self;
+      S.nodes = ev.nodes || [];
+      S.peers = ev.peers || [];
+      log(`connected as ${ev.self.nick} at node ${ev.self.id} (${S.nodes.length} node(s) online in the mesh)`, "sys");
+      renderSidebar();
+      break;
+    }
+    case "peers": S.peers = ev.peers || []; renderSidebar(); break;
+    case "node_map": S.nodes = ev.nodes || []; renderSidebar(); break;
+    case "node_join": log(`* mesh node joined: ${ev.node.nick}`, "sys"); break;
+    case "node_leave": log(`* mesh node left: ${ev.node.nick}`, "sys"); break;
+    case "message": {
+      const mine = S.self && ev.from === S.self.nick;
+      const cls = mine && ev.to === "*" ? "self" : (ev.to === "*" ? "" : "priv");
+      const route = `${hopsStr(ev.hops)}: ${(ev.route || []).join(" -> ")}`;
+      log(`${ev.from} >> ${ev.to}: ${ev.body}   [${route}]`, cls);
+      break;
+    }
+    case "ack":
+      status(`ack: delivered to ${ev.to} [${hopsStr(ev.hops)}: ${(ev.route || []).join(" -> ")}]`);
+      break;
+    case "relay":
+      status(`packet ${ev.id} · hop ${ev.hop}/${ev.hops} via ${ev.via}`, "packet");
+      break;
+    case "wire": {
+      const verb = ev.action === "cut" ? "snipped" : "linked";
+      log(`* wire ${ev.a} <-> ${ev.b} ${verb} by ${ev.by}`, "sys");
+      break;
+    }
+    case "error": log(`error: ${ev.reason}`, "err"); break;
+    default: break; // unknown frame types are ignored, like the TUI does
+  }
+}
+
+/* ---------- connection ---------- */
+async function connect(url, nick) {
+  S.url = url.replace(/\/+$/, "");
+  const res = await api("/api/hello", { nick });
+  if (res.status !== 200 || !res.body.token) {
+    throw new Error(res.body.reason || `HTTP ${res.status} from ${S.url}`);
+  }
+  S.token = res.body.token;
+  S.since = 0;
+  S.connected = true;
+  S.self = null;
+  S.nodes = [];
+  $("#join").hidden = true;
+  $("#room").hidden = false;
+  $("#sidebar").hidden = false;
+  $("#leave").hidden = false;
+  $("#dot").classList.add("on");
+  $("#connstate").textContent = "connected";
+  status("joining...");
+  $("#log").textContent = "";
+  pollLoop().catch(() => {});
+  $("#line").focus();
+}
+
+async function pollLoop() {
+  while (S.connected) {
+    let res;
+    try {
+      res = await api(`/api/events?token=${encodeURIComponent(S.token)}&since=${S.since}&wait=15`);
+    } catch (e) {
+      if (S.connected) { log(`connection lost: ${e}`, "err"); disconnect(false); }
+      return;
+    }
+    if (res.status >= 400) {
+      if (S.connected) {
+        log(res.body.reason || `server answered HTTP ${res.status} -- session expired`, "err");
+        disconnect(false);
+      }
+      return;
+    }
+    S.since = Number.isInteger(res.body.cursor) ? res.body.cursor : S.since;
+    for (const ev of res.body.events || []) if (ev && typeof ev === "object") handle(ev);
+  }
+}
+
+async function disconnect(sayBye) {
+  if (!S.connected) return;
+  S.connected = false;
+  const token = S.token;
+  S.token = null;
+  if (sayBye) { try { await api("/api/bye", { token }); } catch { /* already gone */ } }
+  S.self = null;
+  $("#dot").classList.remove("on");
+  $("#connstate").textContent = "offline";
+  $("#nickhead").textContent = "";
+  $("#leave").hidden = true;
+  $("#sidebar").hidden = true;
+  $("#room").hidden = true;
+  $("#join").hidden = false;
+  status("");
+  renderSidebar();
+}
+
+/* ---------- speaking ---------- */
+async function send(to, body) {
+  const res = await api("/api/send", { token: S.token, to, body });
+  if (res.status === 401) {
+    log(res.body.reason || "session expired", "err");
+    disconnect(false);
+    return;
+  }
+  // 4xx validation failures (404 no such node, 409 no route...) also
+  // arrive as streamed `error` events (that is where the log line comes
+  // from), so do not double-report -- and never treat them as a lost
+  // session, exactly like the TUI.
+  if (res.status < 400) status(`sent to ${to}...`);
+}
+
+async function wire(action, a, b) {
+  const res = await api("/api/wire", { token: S.token, action, a, b });
+  if (res.status === 401) {
+    log(res.body.reason || "session expired", "err");
+    disconnect(false);
+  }
+}
+
+function submitLine(text) {
+  text = text.trim();
+  if (!text) return;
+  if (!text.startsWith("/")) {
+    status(`broadcasting...`);
+    send("*", text);
+    return;
+  }
+  const [cmd, ...rest] = text.split(/\s+/);
+  const arg = rest.join(" ");
+  switch (cmd) {
+    case "/help": log(HELP, "sys"); break;
+    case "/msg":
+    case "/n": {
+      const m = arg.match(/^(\S+)\s+(.+)$/);
+      if (!m) { log("usage: /msg <nick> <text>", "err"); break; }
+      if (!S.self) break;
+      log(`you -> ${m[1]}: ${m[2]}`, "priv");
+      send(m[1], m[2]);
+      break;
+    }
+    case "/dc":
+    case "/cn": {
+      const pair = rest.length >= 2 ? rest.slice(0, 2)
+                : rest.length === 1 && S.self ? [S.self.nick, rest[0]] : null;
+      if (!pair) { log(`usage: ${cmd} <a> <b>  (or ${cmd} <nick> for a wire on your own node)`, "err"); break; }
+      wire(cmd === "/dc" ? "cut" : "link", pair[0], pair[1]);
+      break;
+    }
+    case "/part":
+    case "/quit": disconnect(true); break;
+    default: log(`unknown command: ${cmd} (try /help)`, "err");
+  }
+}
+
+/* ---------- wiring the DOM ---------- */
+$("#url").value = location.protocol.startsWith("http")
+  ? location.origin
+  : "http://127.0.0.1:8080";
+
+$("#join").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const url = $("#url").value.trim();
+  const nick = $("#nick").value.trim();
+  const errBox = $("#joinerr");
+  errBox.textContent = "";
+  if (!/^https?:\/\//.test(url)) { errBox.textContent = "server url must start with http:// or https://"; return; }
+  if (!nick || nick.length > 24) { errBox.textContent = "nick must be 1-24 characters"; return; }
+  $("#connectbtn").disabled = true;
+  try {
+    await connect(url, nick);
+  } catch (e2) {
+    errBox.textContent = String(e2.message || e2);
+  } finally {
+    $("#connectbtn").disabled = false;
+  }
+});
+
+$("#composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const line = $("#line");
+  const text = line.value;
+  line.value = "";
+  if (S.connected) submitLine(text);
+});
+
+$("#leave").addEventListener("click", () => disconnect(true));
+</script>
+</body>
+</html>
